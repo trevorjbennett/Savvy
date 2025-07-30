@@ -1,16 +1,11 @@
 import flet as ft
 import asyncio
-import re
-import sys
-import os
-import json
-from datetime import datetime
-import pickle
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List
+
+from data_loader import _top_tags
+from ipc import SearchWorker
+import search
 # The 'Counter' import is no longer needed
 
 # --- Basic Configuration ---
@@ -35,6 +30,7 @@ _package_list_view_ref: ft.ListView = None
 _current_search_query_field: ft.TextField = None
 _queue_count_button: ft.TextButton = None
 _top_tags: List[str] = []
+_search_worker: SearchWorker = None
 
 package_detail_dialog = ft.AlertDialog(
     modal=True,
@@ -47,183 +43,7 @@ package_detail_dialog = ft.AlertDialog(
 )
 
 # --- Semantic Search Engine ---
-MODEL, SOFTWARE_DATA, VECTOR_INDEX = None, None, None
 
-def load_data_and_model():
-    """
-    Loads all necessary assets: the sentence transformer model,
-    the software data JSON, and the pre-computed vector index.
-    """
-    global MODEL, SOFTWARE_DATA, VECTOR_INDEX, _top_tags
-    logging.info("Loading semantic search model (SentenceTransformer)...")
-    try:
-        MODEL = SentenceTransformer('all-MiniLM-L6-v2')
-        logging.info("Semantic search model loaded successfully.")
-    except Exception as e:
-        logging.error(f"Failed to load SentenceTransformer model: {e}")
-        return False
-
-    logging.info("Attempting to load data.json and vector_index.pkl...")
-    try:
-        # data.json is still needed for retrieving full package details
-        with open("data.json", 'r', encoding='utf-8') as f:
-            SOFTWARE_DATA = json.load(f)
-            logging.info("Successfully loaded data.json.")
-        with open("vector_index.pkl", "rb") as f:
-            VECTOR_INDEX = pickle.load(f)
-            logging.info("Successfully loaded vector_index.pkl.")
-            
-        # --- NEW: Load top tags directly from the index ---
-        _top_tags = VECTOR_INDEX.get('top_tags', [])
-        if _top_tags:
-            logging.info(f"Loaded top tags from index: {_top_tags}")
-
-    except FileNotFoundError as e:
-        logging.error(f"Data file not found: {e}. Please ensure data.json and vector_index.pkl are present.")
-        return False
-    except Exception as e:
-        logging.error(f"An unexpected error occurred during data loading: {e}")
-        return False
-    return True
-
-# --- This function is now obsolete and has been removed ---
-# def extract_top_tags():
-
-def perform_search(query: str) -> List[Dict[str, Any]]:
-    """
-    Performs semantic search on the vector index and returns sorted results.
-    """
-    if not query or not MODEL or not VECTOR_INDEX or not SOFTWARE_DATA:
-        return []
-
-    query_embedding = MODEL.encode(query, convert_to_tensor=False)
-    similarities = cosine_similarity([query_embedding], VECTOR_INDEX['embeddings'])[0]
-    top_indices = np.argsort(similarities)[-50:][::-1]
-
-    results = []
-    for idx in top_indices:
-        if similarities[idx] > 0.3:
-            metadata_id = VECTOR_INDEX['metadata'][idx]
-            key, version_idx_str = metadata_id.split('::')
-            version_idx = int(version_idx_str)
-            version_data = SOFTWARE_DATA[key]['Versions'][version_idx].copy()
-            version_data['SoftwareTitle'] = SOFTWARE_DATA[key]['Title']
-            version_data['__metadata_id'] = metadata_id
-            results.append(version_data)
-    return results
-
-### --- OPTIMIZED FUNCTION --- ###
-def perform_tag_filter(tag: str) -> List[Dict[str, Any]]:
-    """
-    Filters packages using the pre-computed 'tag_map' from the index for high performance.
-    """
-    tag_map = VECTOR_INDEX.get("tag_map", {})
-    if not tag or not tag_map or not SOFTWARE_DATA:
-        return []
-
-    # Find all metadata IDs that have the desired tag
-    lower_tag = tag.lower()
-    matching_ids = [
-        metadata_id
-        for metadata_id, tags in tag_map.items()
-        if lower_tag in tags
-    ]
-
-    results = []
-    # Retrieve the full data only for the matching packages
-    for metadata_id in matching_ids:
-        try:
-            key, version_idx_str = metadata_id.split('::')
-            version_idx = int(version_idx_str)
-            software_info = SOFTWARE_DATA[key]
-            version_data = software_info['Versions'][version_idx]
-            
-            result_item = version_data.copy()
-            result_item['SoftwareTitle'] = software_info.get('Title', key)
-            result_item['__metadata_id'] = metadata_id
-            results.append(result_item)
-        except (KeyError, IndexError, ValueError):
-            # This is good practice in case the index and data are out of sync
-            continue
-            
-    return results
-
-def find_related_packages(target_pkg_data: dict, count: int = 4) -> List[Dict[str, Any]]:
-    """
-    Finds packages semantically similar to the target package.
-    """
-    target_metadata_id = target_pkg_data.get('__metadata_id')
-    if not target_metadata_id or not MODEL or not VECTOR_INDEX or not SOFTWARE_DATA:
-        return []
-
-    try:
-        target_idx = VECTOR_INDEX['metadata'].index(target_metadata_id)
-        target_embedding = VECTOR_INDEX['embeddings'][target_idx]
-    except (ValueError, IndexError):
-        logging.warning(f"Could not find metadata_id {target_metadata_id} in index.")
-        return []
-
-    similarities = cosine_similarity([target_embedding], VECTOR_INDEX['embeddings'])[0]
-    top_indices = np.argsort(similarities)[-(count+1):][::-1]
-
-    results = []
-    for idx in top_indices:
-        metadata_id = VECTOR_INDEX['metadata'][idx]
-        if metadata_id == target_metadata_id:
-            continue
-
-        key, version_idx_str = metadata_id.split('::')
-        version_idx = int(version_idx_str)
-        version_data = SOFTWARE_DATA[key]['Versions'][version_idx].copy()
-        version_data['SoftwareTitle'] = SOFTWARE_DATA[key]['Title']
-        version_data['__metadata_id'] = metadata_id
-        results.append(version_data)
-
-        if len(results) == count:
-            break
-            
-    return results
-
-def get_default_results() -> List[Dict[str, Any]]:
-    """
-    Returns the 50 most recently updated software versions that are present in the vector index.
-    """
-    if not SOFTWARE_DATA or not VECTOR_INDEX:
-        return []
-
-    indexed_packages = []
-    for metadata_id in VECTOR_INDEX['metadata']:
-        try:
-            key, version_idx_str = metadata_id.split('::')
-            version_idx = int(version_idx_str)
-            software_info = SOFTWARE_DATA[key]
-            version_data = software_info['Versions'][version_idx].copy()
-            version_data['SoftwareTitle'] = software_info.get('Title', key)
-            version_data['__metadata_id'] = metadata_id
-            indexed_packages.append(version_data)
-        except (KeyError, IndexError, ValueError) as e:
-            logging.warning(f"Skipping package with metadata_id '{metadata_id}' due to data inconsistency: {e}")
-            continue
-
-    indexed_packages.sort(
-        key=lambda v: int(re.search(r'\((\d+)\)', v.get("LastUpdated", "/Date(0)/")).group(1) or 0),
-        reverse=True
-    )
-    return indexed_packages[:50]
-
-def format_timestamp(date_str: Optional[str]) -> str:
-    if not date_str:
-        return "N/A"
-    match = re.search(r'\((\d+)\)', date_str)
-    if match:
-        timestamp_ms = match.group(1)
-        if timestamp_ms:
-            timestamp = int(timestamp_ms) / 1000
-            try:
-                return datetime.fromtimestamp(timestamp).strftime('%d %B %Y')
-            except (ValueError, OSError):
-                return "Invalid Date"
-    return "Invalid Date"
 
 
 # --- UI Functions ---
@@ -255,7 +75,7 @@ async def show_package_details_global(pkg_data: dict):
 
     details_column = [
         ft.Text(f"Version: {pkg_data.get('Version', 'N/A')}", color=TEXT_SECONDARY, size=14),
-        ft.Text(f"Last Updated: {format_timestamp(pkg_data.get('LastUpdated'))}", color=TEXT_SECONDARY, size=14),
+        ft.Text(f"Last Updated: {search.format_timestamp(pkg_data.get('LastUpdated'))}", color=TEXT_SECONDARY, size=14),
         ft.Container(height=15),
         ft.Text("Summary:", weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY, size=16),
         ft.Text(pkg_data.get("Summary", "Not available."), color=TEXT_PRIMARY, size=15, selectable=True),
@@ -282,7 +102,7 @@ async def show_package_details_global(pkg_data: dict):
     )
     _page_ref.update()
     
-    related_packages = await asyncio.to_thread(find_related_packages, pkg_data)
+    related_packages = await asyncio.to_thread(search.find_related_packages, pkg_data)
 
     if related_packages:
         suggestion_chips = [
@@ -340,14 +160,7 @@ async def run_search_and_update_view(query: str):
     _package_list_view_ref.controls.append(loading_indicator)
     _page_ref.update()
 
-    results = []
-    if query.lower().startswith("tag:"):
-        tag = query.split(":", 1)[1]
-        results = await asyncio.to_thread(perform_tag_filter, tag)
-    elif query:
-        results = await asyncio.to_thread(perform_search, query)
-    else:
-        results = await asyncio.to_thread(get_default_results)
+    results = await asyncio.to_thread(_search_worker.search, query)
 
     _package_list_view_ref.controls.clear()
 
@@ -577,9 +390,10 @@ async def show_queue_screen():
     _page_ref.add(ft.Stack([faded_hue_effect, placeholder_content], expand=True))
     _page_ref.update()
 
-async def main(page: ft.Page):
-    global _page_ref, _global_snackbar
+async def main(page: ft.Page, search_worker: SearchWorker):
+    global _page_ref, _global_snackbar, _search_worker
     _page_ref = page
+    _search_worker = search_worker
 
     page.title = "Savvy App Centre (Semantic Search)"
     page.window_frameless = True
@@ -593,7 +407,9 @@ async def main(page: ft.Page):
     page.overlay.append(_global_snackbar)
     page.overlay.append(package_detail_dialog)
 
-    if not load_data_and_model():
+    # The worker loads data when it starts; if it failed, show an error screen
+    test = await asyncio.to_thread(_search_worker.search, "")
+    if isinstance(test, dict) and test.get('error'):
         page.add(
             ft.Column(
                 [
@@ -611,9 +427,9 @@ async def main(page: ft.Page):
         page.update()
         return
     
-    # The 'extract_top_tags()' call is no longer needed here
-    
     await show_initial_screen()
 
 if __name__ == "__main__":
-    ft.app(target=main, assets_dir="assets")
+    worker = SearchWorker()
+    ft.app(target=lambda page: main(page, worker), assets_dir="assets")
+    worker.close()
