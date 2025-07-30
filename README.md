@@ -12,6 +12,7 @@ python main.py
 ```
 
 The application expects `data.json` and `vector_index.pkl` in the same directory.
+If they are missing the app will start but display an error screen.
 
 ## Code Structure
 
