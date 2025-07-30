@@ -431,5 +431,11 @@ async def main(page: ft.Page, search_worker: SearchWorker):
 
 if __name__ == "__main__":
     worker = SearchWorker()
-    ft.app(target=lambda page: main(page, worker), assets_dir="assets")
-    worker.close()
+
+    async def app_target(page: ft.Page):
+        await main(page, worker)
+
+    try:
+        ft.app(target=app_target, assets_dir="assets")
+    finally:
+        worker.close()
