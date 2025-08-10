@@ -40,7 +40,7 @@ class ChocoWorker:
                 self.response_q.put(response)
                 continue
 
-            choco_path = 'C:\\ProgramData\\chocolatey\\bin\\choco.bat'
+            choco_path = 'C:\\ProgramData\\chocolatey\\choco.exe'
 
             if message.get('type') == 'check_status':
                 try:
@@ -170,6 +170,13 @@ class SearchWorker:
             if message.get('type') == 'stop':
                 logging.info("SearchWorker received stop signal. Exiting.")
                 break
+
+            if message.get('type') == 'find_related':
+                pkg_data = message.get('pkg_data')
+                results = search.find_related_packages(pkg_data)
+                self.response_q.put(results)
+                continue
+
             query = message.get('query', '')
             if query.lower().startswith('tag:'):
                 tag = query.split(':', 1)[1]
@@ -183,6 +190,10 @@ class SearchWorker:
 
     def search(self, query: str) -> List[Dict[str, Any]]:
         self.request_q.put({'type': 'search', 'query': query})
+        return self.response_q.get()
+
+    def find_related(self, pkg_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        self.request_q.put({'type': 'find_related', 'pkg_data': pkg_data})
         return self.response_q.get()
 
     def close(self):

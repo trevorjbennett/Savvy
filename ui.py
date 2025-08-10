@@ -246,7 +246,7 @@ async def show_package_details_global(pkg_data: dict):
     )
     _page_ref.update()
 
-    related_packages = await asyncio.to_thread(search.find_related_packages, pkg_data)
+    related_packages = await asyncio.to_thread(_search_worker.find_related, pkg_data)
 
     if related_packages:
         suggestion_chips = [
