@@ -2,7 +2,19 @@ import flet as ft
 from ipc import SearchWorker
 from ui import main as ui_main
 
+
+def main():
+    """Application entry point."""
+    worker = SearchWorker()
+
+    async def app_target(page: ft.Page):
+        await ui_main(page, worker)
+
+    try:
+        ft.app(target=app_target, assets_dir="assets")
+    finally:
+        worker.close()
+
+
 if __name__ == "__main__":
-    search_worker = SearchWorker()
-    ft.app(target=lambda page: ui_main(page, search_worker), assets_dir="assets")
-    search_worker.close()
+    main()
