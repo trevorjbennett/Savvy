@@ -932,7 +932,7 @@ class QueueItem:
             self.status_icon.name = ft.Icons.ERROR_ROUNDED
             self.status_icon.color = ft.Colors.RED
             self.status_text.value = "Missing Package ID"
-            await _page_ref.update_async()
+            await _page_ref.update()
             return
 
         self.status = "Installing"
@@ -940,7 +940,7 @@ class QueueItem:
         self.status_text.value = self.status
         self.retry_button.visible = False
         self.remove_button.disabled = True
-        await _page_ref.update_async()
+        await _page_ref.update()
 
         response = await asyncio.to_thread(_choco_worker.execute, 'install', self.pkg_id, self.pkg_title)
 
@@ -949,7 +949,7 @@ class QueueItem:
             self.status_icon = ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, color=ft.Colors.GREEN)
             self.status_text.value = self.status
             self.remove_button.disabled = False
-            await _page_ref.update_async()
+            await _page_ref.update()
             await asyncio.sleep(2)
             remove_from_queue(self.pkg_title)
         else:
@@ -959,7 +959,7 @@ class QueueItem:
             self.retry_button.visible = True
             self.remove_button.disabled = False
             await AppNotifier.show_snackbar(response.get('message', 'An unknown error occurred.'), bgcolor=ft.Colors.RED_800)
-            await _page_ref.update_async()
+            await _page_ref.update()
 
     def remove(self, e):
         remove_from_queue(self.pkg_title)
@@ -1004,7 +1004,7 @@ async def show_queue_screen():
         overall_status_text.value = f"Finished. {installed_count}/{total_items} installed successfully."
         install_button.disabled = False
         clear_button.disabled = False
-        await _page_ref.update_async()
+        await _page_ref.update()
 
     install_button = ft.FilledButton("Install All", icon=ft.Icons.PLAYLIST_ADD_CHECK_CIRCLE_ROUNDED, on_click=install_all, style=ft.ButtonStyle(bgcolor=BUTTON_PRIMARY_BG, color=TEXT_ON_PRIMARY_ACTION, shape=ft.RoundedRectangleBorder(radius=BUTTON_RADIUS)))
 
@@ -1036,7 +1036,7 @@ async def show_queue_screen():
         ], expand=True)
         _page_ref.add(ft.Container(layout, padding=ft.padding.symmetric(horizontal=30, vertical=20), expand=True))
 
-    await _page_ref.update_async()
+    await _page_ref.update()
 
 
 async def show_installed_screen():
