@@ -44,6 +44,7 @@ _theme_toggle: Optional[ft.Switch] = None
 _is_wide: bool = False  # recalculated on resize/fullscreen
 _current_screen: str = "initial"  # initial | results | queue
 _last_query: str = ""
+_search_worker_ready: bool = False
 
 # In-memory user features
 _install_queue: List[dict] = []
@@ -60,7 +61,57 @@ package_detail_dialog = ft.AlertDialog(
     surface_tint_color=ft.Colors.WHITE,
 )
 
+settings_dialog = ft.AlertDialog(
+    modal=True,
+    title=ft.Text("Settings"),
+    content=ft.Column(), # Content will be populated dynamically
+    actions=[
+        ft.TextButton("Close", on_click=lambda e: close_dialog_global(settings_dialog))
+    ],
+    actions_alignment=ft.MainAxisAlignment.END,
+    shape=ft.RoundedRectangleBorder(radius=BUTTON_RADIUS),
+    bgcolor=BACKGROUND_COLOR,
+)
+
 # ---------- Helpers ----------
+
+async def show_settings_dialog():
+    """Opens the settings dialog and triggers content loading."""
+    settings_dialog.content = ft.Row(
+        [
+            ft.ProgressRing(width=16, height=16, stroke_width=2),
+            ft.Text("Checking Chocolatey status..."),
+        ],
+        spacing=10
+    )
+    settings_dialog.open = True
+    _page_ref.update()
+
+    # Get status from worker
+    response = await asyncio.to_thread(_choco_worker.check_status)
+
+    status = response.get('status')
+    if status == 'choco_ok':
+        version = response.get('version', 'Unknown version')
+        content = ft.Row(
+            [
+                ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, color=ft.Colors.GREEN),
+                ft.Text(f"Chocolatey found (v{version})", color=TEXT_PRIMARY),
+            ],
+            spacing=10
+        )
+    else:
+        message = response.get('message', 'An unknown error occurred.')
+        content = ft.Row(
+            [
+                ft.Icon(ft.Icons.ERROR_ROUNDED, color=ft.Colors.RED),
+                ft.Text(f"Chocolatey not found: {message}", color=TEXT_PRIMARY),
+            ],
+            spacing=10
+        )
+
+    settings_dialog.content = ft.Column([content])
+    _page_ref.update()
 
 def flow_wrap(controls: List[ft.Control], spacing: int = 6, run_spacing: int = 6) -> ft.Control:
     """Use ft.Wrap when available, else fall back to a horizontally scrollable Row."""
@@ -493,6 +544,11 @@ def create_app_bar(current_screen: str):
             ft.Container(width=10),
             ft.Icon(ft.Icons.DARK_MODE_ROUNDED, color=TEXT_SECONDARY, size=18),
             _theme_toggle,
+            ft.IconButton(
+                icon=ft.Icons.SETTINGS_ROUNDED,
+                tooltip="Settings",
+                on_click=lambda _: _page_ref.run_task(show_settings_dialog),
+            ),
             ft.Container(width=10),
             minimize_button,
             fullscreen_button,
@@ -522,11 +578,11 @@ async def show_initial_screen():
     _page_ref.bgcolor = BACKGROUND_COLOR
 
     def on_change(e: ft.ControlEvent):
-        if _debouncer:
+        if _debouncer and _search_worker_ready:
             _debouncer.trigger(e.control.value)
 
     _current_search_query_field = ft.TextField(
-        hint_text="Search for applications...",
+        hint_text="Loading search model..." if not _search_worker_ready else "Search for applications...",
         expand=True,
         border_radius=SEARCH_BAR_RADIUS,
         content_padding=ft.padding.symmetric(horizontal=30, vertical=22),
@@ -540,6 +596,7 @@ async def show_initial_screen():
         prefix_icon=ft.Icon(ft.Icons.SEARCH, color=TEXT_SECONDARY),
         on_submit=lambda e: _page_ref.run_task(show_results_screen, e.control.value),
         on_change=on_change,
+        disabled=not _search_worker_ready,
     )
 
     _debouncer = Debouncer(400, preview_live_results)
@@ -553,6 +610,7 @@ async def show_initial_screen():
             bgcolor=BUTTON_PRIMARY_BG,
             color=TEXT_ON_PRIMARY_ACTION,
         ),
+        disabled=not _search_worker_ready,
     )
 
     search_area = ft.Container(
@@ -719,12 +777,12 @@ async def show_results_screen(query: str):
         title_text = "Search Results"
 
     def on_change(e: ft.ControlEvent):
-        if _debouncer:
+        if _debouncer and _search_worker_ready:
             _debouncer.trigger(e.control.value)
 
     _current_search_query_field = ft.TextField(
         value=query if not query.lower().startswith("tag:") else "",
-        hint_text="Search by meaning...",
+        hint_text="Loading search model..." if not _search_worker_ready else "Search by meaning...",
         expand=True,
         border_radius=SEARCH_BAR_RADIUS,
         content_padding=ft.padding.symmetric(horizontal=30, vertical=22),
@@ -738,6 +796,7 @@ async def show_results_screen(query: str):
         prefix_icon=ft.Icon(ft.Icons.SEARCH, color=TEXT_SECONDARY),
         on_submit=lambda e: _page_ref.run_task(run_search_and_update_view, e.control.value),
         on_change=on_change,
+        disabled=not _search_worker_ready,
     )
 
     _debouncer = Debouncer(400, run_search_and_update_view)
@@ -751,6 +810,7 @@ async def show_results_screen(query: str):
             bgcolor=BUTTON_PRIMARY_BG,
             color=TEXT_ON_PRIMARY_ACTION,
         ),
+        disabled=not _search_worker_ready,
     )
 
     _sort_dropdown = ft.Dropdown(
@@ -975,6 +1035,31 @@ async def show_queue_screen():
     _page_ref.update()
 
 
+async def listen_for_worker_status():
+    """Waits for the ready signal from the search worker and refreshes the UI."""
+    global _search_worker_ready
+
+    # This runs in the background, waiting for the first message from the worker
+    response = await asyncio.to_thread(_search_worker.response_q.get)
+
+    if isinstance(response, dict) and response.get('status') == 'ready':
+        _search_worker_ready = True
+        # Refresh the current screen to enable search controls
+        if _current_screen == "initial":
+            await show_initial_screen()
+        elif _current_screen == "results":
+            await show_results_screen(_last_query)
+        # Trigger an initial search to populate the default view
+        await run_search_and_update_view("")
+
+    elif isinstance(response, dict) and response.get('status') == 'error':
+        # The worker failed to load, show a persistent error
+        if _current_search_query_field:
+            _current_search_query_field.hint_text = "Error: Search model failed to load."
+            _current_search_query_field.update()
+        await AppNotifier.show_snackbar("Critical Error: The search model failed to load.", bgcolor=ft.Colors.RED_800, duration=10000)
+
+
 async def main(page: ft.Page, search_worker: SearchWorker, choco_worker: ChocoWorker):
     global _page_ref, _global_snackbar, _search_worker, _choco_worker
     _page_ref = page
@@ -1002,32 +1087,18 @@ async def main(page: ft.Page, search_worker: SearchWorker, choco_worker: ChocoWo
     )
     page.overlay.append(_global_snackbar)
     page.overlay.append(package_detail_dialog)
+    page.overlay.append(settings_dialog)
 
     def on_resize(e: ft.ControlEvent):
         _sync_layout_with_window()
     page.on_resize = on_resize
 
-    test = await asyncio.to_thread(_search_worker.search, "")
-    if isinstance(test, dict) and test.get("error"):
-        page.add(
-            ft.Column(
-                [
-                    ft.Icon(name=ft.Icons.ERROR_OUTLINE_ROUNDED, color=ft.Colors.RED_600, size=50),
-                    ft.Text("Application Error", size=24, weight=ft.FontWeight.BOLD, text_align=ft.TextAlign.CENTER),
-                    ft.Text(
-                        "Could not load `data.json` or `vector_index.pkl`.\nPlease ensure these files are in the same directory.",
-                        text_align=ft.TextAlign.CENTER, size=16, color=TEXT_SECONDARY
-                    ),
-                ],
-                alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=20, expand=True
-            )
-        )
-        page.update()
-        return
-
+    # Immediately show the UI without blocking
     _sync_layout_with_window()
     await show_initial_screen()
+
+    # Start a background task to listen for the worker's ready signal
+    page.run_task(listen_for_worker_status)
 
 
 def _sync_layout_with_window():

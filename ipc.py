@@ -40,6 +40,19 @@ class ChocoWorker:
                 self.response_q.put(response)
                 continue
 
+            if message.get('type') == 'check_status':
+                try:
+                    # Running 'choco --version' is a lightweight way to check if it's installed and in the PATH.
+                    result = subprocess.run(['choco', '--version'], capture_output=True, text=True, check=True, encoding='utf-8')
+                    version = result.stdout.strip()
+                    response = {'status': 'choco_ok', 'version': version}
+                except FileNotFoundError:
+                    response = {'status': 'choco_not_found', 'message': 'Chocolatey executable not found in PATH.'}
+                except Exception as e:
+                    response = {'status': 'choco_error', 'message': str(e)}
+                self.response_q.put(response)
+                continue
+
             if message.get('type') == 'command':
                 command = message.get('command')
                 package_id = message.get('package_id')
@@ -117,6 +130,12 @@ class ChocoWorker:
             'package_title': package_title
         })
 
+    def check_status(self):
+        """Requests a status check from the worker."""
+        self.request_q.put({'type': 'check_status'})
+        # The response will be retrieved from the response_q by a listener in the UI
+        return self.response_q.get()
+
     def close(self):
         # If the queue is empty, putting an item can hang if the process is dead
         # A better approach might be to check if the process is alive
@@ -141,9 +160,10 @@ class SearchWorker:
         success = load_data_and_model()
         if not success:
             logging.error("SearchWorker failed to load model/data. Returning error to main process.")
-            self.response_q.put({'error': 'load_failed'})
+            self.response_q.put({'status': 'error', 'message': 'load_failed'})
             return
         logging.info("SearchWorker successfully loaded model and data.")
+        self.response_q.put({'status': 'ready'})
         while True:
             message = self.request_q.get()
             logging.info(f"SearchWorker received message: {message}")
