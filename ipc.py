@@ -54,6 +54,21 @@ class ChocoWorker:
                 self.response_q.put(response)
                 continue
 
+            if message.get('type') == 'list_installed':
+                try:
+                    choco_command = [choco_path, 'list', '--local-only', '-r']
+                    result = subprocess.run(choco_command, capture_output=True, text=True, check=True, encoding='utf-8')
+                    packages = []
+                    for line in result.stdout.strip().split('\n'):
+                        if '|' in line:
+                            name, version = line.split('|')
+                            packages.append({'name': name, 'version': version})
+                    response = {'status': 'success', 'packages': packages}
+                except Exception as e:
+                    response = {'status': 'error', 'message': str(e)}
+                self.response_q.put(response)
+                continue
+
             if message.get('type') == 'command':
                 command = message.get('command')
                 package_id = message.get('package_id')
@@ -86,13 +101,17 @@ class ChocoWorker:
                     )
 
                     logging.info(f"Command finished with exit code {result.returncode}")
+                    logging.info(f"stdout: {result.stdout}")
+                    logging.info(f"stderr: {result.stderr}")
 
                     if result.returncode == 0:
                         response = {
                             'status': 'success',
                             'command': command,
                             'package_title': package_title,
-                            'message': f"Successfully executed '{command}' for {package_title}."
+                            'message': f"Successfully executed '{command}' for {package_title}.",
+                            'stdout': result.stdout,
+                            'stderr': result.stderr,
                         }
                     else:
                         error_message = result.stderr.strip().split('\n')[-1] or result.stdout.strip().split('\n')[-1] or f"Choco command failed with exit code {result.returncode}."
@@ -100,9 +119,19 @@ class ChocoWorker:
                             'status': 'error',
                             'command': command,
                             'package_title': package_title,
-                            'message': error_message
+                            'message': error_message,
+                            'stdout': result.stdout,
+                            'stderr': result.stderr,
                         }
 
+                except PermissionError:
+                    logging.error("Permission denied. The application may need to be run as an administrator.")
+                    response = {
+                        'status': 'error',
+                        'command': command,
+                        'package_title': package_title,
+                        'message': "Permission Denied. Please try running the application as an administrator."
+                    }
                 except FileNotFoundError:
                     logging.error("Choco command not found. Is Chocolatey installed and in the system's PATH?")
                     response = {
@@ -134,6 +163,11 @@ class ChocoWorker:
         """Requests a status check from the worker."""
         self.request_q.put({'type': 'check_status'})
         # The response will be retrieved from the response_q by a listener in the UI
+        return self.response_q.get()
+
+    def list_installed(self):
+        """Requests a list of locally installed packages from the worker."""
+        self.request_q.put({'type': 'list_installed'})
         return self.response_q.get()
 
     def close(self):

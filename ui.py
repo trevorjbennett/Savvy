@@ -541,6 +541,7 @@ def create_app_bar(current_screen: str):
         actions=[
             ft.Container(content=ft.Text("Search Mode", color=TEXT_SECONDARY, size=12), alignment=ft.alignment.center, padding=ft.padding.only(right=12)),
             _queue_count_button,
+            ft.TextButton("Installed", icon=ft.Icons.HISTORY_ROUNDED, on_click=lambda _: _page_ref.run_task(show_installed_screen)),
             ft.Container(width=10),
             ft.Icon(ft.Icons.DARK_MODE_ROUNDED, color=TEXT_SECONDARY, size=18),
             _theme_toggle,
@@ -900,138 +901,194 @@ async def show_results_screen(query: str):
     await run_search_and_update_view(query)
 
 
+class QueueItem(ft.UserControl):
+    def __init__(self, pkg_data: dict):
+        super().__init__()
+        self.pkg_data = pkg_data
+        self.pkg_title = pkg_data.get("SoftwareTitle", "Unknown")
+        self.pkg_id = pkg_data.get("PackageIdentifier")
+        self.status = "Pending"  # Pending, Installing, Failed, Success
+
+        self.status_icon = ft.Icon(ft.Icons.DOWNLOAD_ROUNDED)
+        self.status_text = ft.Text(self.status, italic=True, color=TEXT_SECONDARY)
+        self.retry_button = ft.IconButton(icon=ft.Icons.REFRESH_ROUNDED, visible=False, on_click=self.install)
+        self.remove_button = ft.IconButton(icon=ft.Icons.DELETE_OUTLINE_ROUNDED, on_click=self.remove)
+
+    async def install(self, e=None):
+        if not self.pkg_id:
+            self.status = "Failed"
+            self.status_icon.name = ft.Icons.ERROR_ROUNDED
+            self.status_icon.color = ft.Colors.RED
+            self.status_text.value = "Missing Package ID"
+            await self.update_async()
+            return
+
+        self.status = "Installing"
+        self.status_icon = ft.ProgressRing(width=16, height=16, stroke_width=2)
+        self.status_text.value = self.status
+        self.retry_button.visible = False
+        self.remove_button.disabled = True
+        await self.update_async()
+
+        response = await asyncio.to_thread(_choco_worker.execute, 'install', self.pkg_id, self.pkg_title)
+
+        if response.get("status") == "success":
+            self.status = "Success"
+            self.status_icon = ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, color=ft.Colors.GREEN)
+            self.status_text.value = self.status
+            self.remove_button.disabled = False
+            # Automatically remove from queue after a delay
+            await asyncio.sleep(2)
+            remove_from_queue(self.pkg_title)
+        else:
+            self.status = "Failed"
+            self.status_icon = ft.Icon(ft.Icons.ERROR_ROUNDED, color=ft.Colors.RED)
+            self.status_text.value = self.status
+            self.retry_button.visible = True
+            self.remove_button.disabled = False
+            await AppNotifier.show_snackbar(response.get('message', 'An unknown error occurred.'), bgcolor=ft.Colors.RED_800)
+
+        await self.update_async()
+
+    def remove(self, e):
+        remove_from_queue(self.pkg_title)
+
+    def build(self):
+        return ft.Container(
+            content=ft.Row([
+                self.status_icon,
+                ft.Text(self.pkg_title, expand=True),
+                self.status_text,
+                self.retry_button,
+                self.remove_button,
+            ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=10),
+            padding=ft.padding.symmetric(vertical=10, horizontal=14),
+            border=ft.border.all(1, BORDER_COLOR),
+            border_radius=BUTTON_RADIUS,
+        )
+
+
 async def show_queue_screen():
     global _current_screen
-    if not _page_ref:
-        return
+    if not _page_ref: return
     _current_screen = "queue"
     _page_ref.controls.clear()
-    _page_ref.route = "/queue"
     _page_ref.appbar = create_app_bar("queue")
     _page_ref.bgcolor = BACKGROUND_COLOR
 
-    progress = ft.ProgressBar(width=400, value=0)
-    status_text = ft.Text("Ready to install.")
-    install_button = ft.FilledButton("Install All", icon=ft.Icons.PLAYLIST_ADD_CHECK_CIRCLE_ROUNDED, on_click=None, style=ft.ButtonStyle(bgcolor=BUTTON_PRIMARY_BG, color=TEXT_ON_PRIMARY_ACTION, shape=ft.RoundedRectangleBorder(radius=BUTTON_RADIUS)))
-    clear_button = ft.OutlinedButton("Clear Queue", icon=ft.Icons.DELETE_SWEEP_ROUNDED, on_click=None)
+    queue_list_view = ft.ListView(expand=True, spacing=10)
+    if _install_queue:
+        for pkg in _install_queue:
+            queue_list_view.controls.append(QueueItem(pkg))
 
-    async def listen_for_install_updates(total_packages: int):
-        installed_count = 0
+    progress_bar = ft.ProgressBar(width=400, value=0)
+    overall_status_text = ft.Text("Ready.")
+
+    async def install_all(e):
         install_button.disabled = True
         clear_button.disabled = True
-        _page_ref.update()
 
-        while installed_count < total_packages:
-            try:
-                response = await asyncio.to_thread(_choco_worker.response_q.get, timeout=300)
-                installed_count += 1
+        total_items = len(queue_list_view.controls)
+        installed_count = 0
 
-                title = response.get('package_title', 'Unknown package')
-                status = response.get('status')
-                message = response.get('message')
+        for i, item in enumerate(queue_list_view.controls):
+            if isinstance(item, QueueItem) and item.status == "Pending":
+                progress_bar.value = (i + 1) / total_items
+                overall_status_text.value = f"Installing {item.pkg_title}..."
+                await item.install()
+                if item.status == "Success":
+                    installed_count += 1
 
-                progress.value = installed_count / total_packages
-                status_text.value = f"({installed_count}/{total_packages}) {title}: {status}"
-
-                if status == 'success':
-                    remove_from_queue(title)
-                    await AppNotifier.show_snackbar(message)
-                else:
-                    await AppNotifier.show_snackbar(f"Error installing {title}: {message}", bgcolor=ft.Colors.RED_800)
-
-                _page_ref.update()
-
-            except Exception: # Catches queue.Empty
-                status_text.value = f"({installed_count}/{total_packages}) Installation timed out."
-                _page_ref.update()
-                break
-
-        status_text.value = "All installation tasks processed."
+        overall_status_text.value = f"Finished. {installed_count}/{total_items} installed successfully."
         install_button.disabled = False
         clear_button.disabled = False
-        _page_ref.update()
+        await _page_ref.update_async()
 
+    install_button = ft.FilledButton("Install All", icon=ft.Icons.PLAYLIST_ADD_CHECK_CIRCLE_ROUNDED, on_click=install_all, style=ft.ButtonStyle(bgcolor=BUTTON_PRIMARY_BG, color=TEXT_ON_PRIMARY_ACTION, shape=ft.RoundedRectangleBorder(radius=BUTTON_RADIUS)))
 
-    async def install_all(e=None):
-        if not _install_queue or not _choco_worker:
-            return
-
-        total = len(_install_queue)
-        status_text.value = f"Starting installation of {total} packages..."
-        _page_ref.update()
-
-        packages_to_install = list(_install_queue)
-
-        for pkg in packages_to_install:
-            pkg_id = pkg.get("PackageIdentifier")
-            pkg_title = pkg.get("SoftwareTitle", "Unknown")
-            if pkg_id:
-                _choco_worker.execute('install', pkg_id, pkg_title)
-            else:
-                await AppNotifier.show_snackbar(f"Skipping '{pkg_title}': Missing PackageIdentifier.", bgcolor=ft.Colors.AMBER_800)
-                total -= 1
-
-        if total > 0:
-            _page_ref.run_task(listen_for_install_updates, total)
-
-    install_button.on_click = install_all
-
-    def _clear_queue(e=None):
+    def _clear_queue(e):
         _install_queue.clear()
         update_queue_badge()
         _page_ref.run_task(show_queue_screen)
 
-    clear_button.on_click = _clear_queue
+    clear_button = ft.OutlinedButton("Clear Queue", icon=ft.Icons.DELETE_SWEEP_ROUNDED, on_click=_clear_queue)
 
     if not _install_queue:
-        placeholder_content = ft.Column(
-            [
-                ft.Icon(ft.Icons.QUEUE_PLAY_NEXT_OUTLINED, size=64, color=TEXT_SECONDARY),
-                ft.Text("Queue is empty", size=22, weight=ft.FontWeight.BOLD, color=TEXT_PRIMARY),
-                ft.Text("Find apps and click Install to queue them.", size=16, color=TEXT_SECONDARY, text_align=ft.TextAlign.CENTER),
-            ],
-            alignment=ft.MainAxisAlignment.CENTER,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            spacing=20,
-            expand=True,
-        )
-        _page_ref.add(ft.Stack([placeholder_content], expand=True))
-        _page_ref.update()
+        _page_ref.add(ft.Column([
+            ft.Icon(ft.Icons.QUEUE_PLAY_NEXT_OUTLINED, size=64, color=TEXT_SECONDARY),
+            ft.Text("Queue is empty", size=22, weight=ft.FontWeight.BOLD),
+            ft.Text("Find apps and click Install to queue them.", size=16, text_align=ft.TextAlign.CENTER),
+        ], alignment=ft.MainAxisAlignment.CENTER, horizontal_alignment=ft.CrossAxisAlignment.CENTER, expand=True))
+    else:
+        actions = ft.Row([
+            install_button, clear_button, progress_bar, overall_status_text
+        ], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+        layout = ft.Column([
+            ft.Container(height=8),
+            ft.Text("Installation Queue", size=22, weight=ft.FontWeight.W_600),
+            ft.Container(height=6),
+            queue_list_view,
+            ft.Divider(color=BORDER_COLOR),
+            actions,
+        ], expand=True)
+        _page_ref.add(ft.Container(layout, padding=ft.padding.symmetric(horizontal=30, vertical=20), expand=True))
+
+    await _page_ref.update_async()
+
+
+async def show_installed_screen():
+    global _current_screen
+    if not _page_ref:
         return
+    _current_screen = "installed"
+    _page_ref.controls.clear()
+    _page_ref.appbar = create_app_bar("installed")
+    _page_ref.bgcolor = BACKGROUND_COLOR
 
-    items = []
-    for pkg in _install_queue:
-        title = pkg.get("SoftwareTitle", "Unknown")
-        items.append(
-            ft.Container(
-                content=ft.Row([
-                    ft.Icon(ft.Icons.DOWNLOAD_ROUNDED),
-                    ft.Text(title, expand=True),
-                    ft.IconButton(icon=ft.Icons.DELETE_OUTLINE_ROUNDED, tooltip="Remove", on_click=lambda e, t=title: remove_from_queue(t)),
-                ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                padding=ft.padding.symmetric(vertical=10, horizontal=14),
-                border=ft.border.all(1, BORDER_COLOR),
-                border_radius=BUTTON_RADIUS,
-            )
-        )
-
-    actions = ft.Row([
-        install_button,
-        clear_button,
-        progress,
-        status_text,
-    ], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+    loading_indicator = ft.Row(
+        [ft.ProgressRing(width=16, height=16, stroke_width=2), ft.Text("Loading installed packages...")],
+        alignment=ft.MainAxisAlignment.CENTER
+    )
 
     layout = ft.Column([
         ft.Container(height=8),
-        ft.Text("Installation Queue", size=22, weight=ft.FontWeight.W_600),
+        ft.Text("Installed Packages", size=22, weight=ft.FontWeight.W_600),
         ft.Container(height=6),
-        ft.Column(items, spacing=10, expand=True, scroll=ft.ScrollMode.ADAPTIVE),
-        ft.Divider(color=BORDER_COLOR),
-        actions,
-    ], expand=True)
+        loading_indicator,
+    ], expand=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
 
     _page_ref.add(ft.Container(layout, padding=ft.padding.symmetric(horizontal=30, vertical=20), expand=True))
+    _page_ref.update()
+
+    response = await asyncio.to_thread(_choco_worker.list_installed)
+
+    layout.controls.remove(loading_indicator)
+
+    if response.get('status') == 'success':
+        packages = response.get('packages', [])
+        if packages:
+            list_view = ft.ListView(expand=True, spacing=10)
+            for pkg in packages:
+                list_view.controls.append(
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Icon(ft.Icons.CHECK_CIRCLE_OUTLINE_ROUNDED, color=ft.Colors.GREEN),
+                            ft.Text(pkg.get('name'), weight=ft.FontWeight.BOLD),
+                            ft.Text(f"v{pkg.get('version')}"),
+                        ], spacing=10),
+                        padding=ft.padding.symmetric(vertical=10, horizontal=14),
+                        border=ft.border.all(1, BORDER_COLOR),
+                        border_radius=BUTTON_RADIUS,
+                    )
+                )
+            layout.controls.append(list_view)
+        else:
+            layout.controls.append(ft.Text("No locally installed packages found."))
+    else:
+        error_message = response.get('message', 'An unknown error occurred.')
+        layout.controls.append(ft.Text(f"Error loading packages: {error_message}", color=ft.Colors.RED))
+
     _page_ref.update()
 
 
