@@ -976,10 +976,12 @@ async def show_queue_screen():
     _page_ref.appbar = create_app_bar("queue")
     _page_ref.bgcolor = BACKGROUND_COLOR
 
-    queue_list_view = ft.ListView(expand=True, spacing=10)
-    if _install_queue:
-        for pkg in _install_queue:
-            queue_list_view.controls.append(QueueItem(pkg))
+    queue_items = [QueueItem(pkg) for pkg in _install_queue]
+    queue_list_view = ft.ListView(
+        controls=[item.build() for item in queue_items],
+        expand=True,
+        spacing=10
+    )
 
     progress_bar = ft.ProgressBar(width=400, value=0)
     overall_status_text = ft.Text("Ready.")
@@ -988,11 +990,11 @@ async def show_queue_screen():
         install_button.disabled = True
         clear_button.disabled = True
 
-        total_items = len(queue_list_view.controls)
+        total_items = len(queue_items)
         installed_count = 0
 
-        for i, item in enumerate(queue_list_view.controls):
-            if isinstance(item, QueueItem) and item.status == "Pending":
+        for i, item in enumerate(queue_items):
+            if item.status == "Pending":
                 progress_bar.value = (i + 1) / total_items
                 overall_status_text.value = f"Installing {item.pkg_title}..."
                 await item.install()
