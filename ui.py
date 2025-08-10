@@ -901,60 +901,19 @@ async def show_results_screen(query: str):
     await run_search_and_update_view(query)
 
 
-class QueueItem(ft.UserControl):
+class QueueItem:
     def __init__(self, pkg_data: dict):
-        super().__init__()
         self.pkg_data = pkg_data
         self.pkg_title = pkg_data.get("SoftwareTitle", "Unknown")
         self.pkg_id = pkg_data.get("PackageIdentifier")
-        self.status = "Pending"  # Pending, Installing, Failed, Success
+        self.status = "Pending"
 
         self.status_icon = ft.Icon(ft.Icons.DOWNLOAD_ROUNDED)
         self.status_text = ft.Text(self.status, italic=True, color=TEXT_SECONDARY)
         self.retry_button = ft.IconButton(icon=ft.Icons.REFRESH_ROUNDED, visible=False, on_click=self.install)
         self.remove_button = ft.IconButton(icon=ft.Icons.DELETE_OUTLINE_ROUNDED, on_click=self.remove)
 
-    async def install(self, e=None):
-        if not self.pkg_id:
-            self.status = "Failed"
-            self.status_icon.name = ft.Icons.ERROR_ROUNDED
-            self.status_icon.color = ft.Colors.RED
-            self.status_text.value = "Missing Package ID"
-            await self.update_async()
-            return
-
-        self.status = "Installing"
-        self.status_icon = ft.ProgressRing(width=16, height=16, stroke_width=2)
-        self.status_text.value = self.status
-        self.retry_button.visible = False
-        self.remove_button.disabled = True
-        await self.update_async()
-
-        response = await asyncio.to_thread(_choco_worker.execute, 'install', self.pkg_id, self.pkg_title)
-
-        if response.get("status") == "success":
-            self.status = "Success"
-            self.status_icon = ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, color=ft.Colors.GREEN)
-            self.status_text.value = self.status
-            self.remove_button.disabled = False
-            # Automatically remove from queue after a delay
-            await asyncio.sleep(2)
-            remove_from_queue(self.pkg_title)
-        else:
-            self.status = "Failed"
-            self.status_icon = ft.Icon(ft.Icons.ERROR_ROUNDED, color=ft.Colors.RED)
-            self.status_text.value = self.status
-            self.retry_button.visible = True
-            self.remove_button.disabled = False
-            await AppNotifier.show_snackbar(response.get('message', 'An unknown error occurred.'), bgcolor=ft.Colors.RED_800)
-
-        await self.update_async()
-
-    def remove(self, e):
-        remove_from_queue(self.pkg_title)
-
-    def build(self):
-        return ft.Container(
+        self.view = ft.Container(
             content=ft.Row([
                 self.status_icon,
                 ft.Text(self.pkg_title, expand=True),
@@ -966,6 +925,47 @@ class QueueItem(ft.UserControl):
             border=ft.border.all(1, BORDER_COLOR),
             border_radius=BUTTON_RADIUS,
         )
+
+    async def install(self, e=None):
+        if not self.pkg_id:
+            self.status = "Failed"
+            self.status_icon.name = ft.Icons.ERROR_ROUNDED
+            self.status_icon.color = ft.Colors.RED
+            self.status_text.value = "Missing Package ID"
+            await _page_ref.update_async()
+            return
+
+        self.status = "Installing"
+        self.status_icon = ft.ProgressRing(width=16, height=16, stroke_width=2)
+        self.status_text.value = self.status
+        self.retry_button.visible = False
+        self.remove_button.disabled = True
+        await _page_ref.update_async()
+
+        response = await asyncio.to_thread(_choco_worker.execute, 'install', self.pkg_id, self.pkg_title)
+
+        if response.get("status") == "success":
+            self.status = "Success"
+            self.status_icon = ft.Icon(ft.Icons.CHECK_CIRCLE_ROUNDED, color=ft.Colors.GREEN)
+            self.status_text.value = self.status
+            self.remove_button.disabled = False
+            await _page_ref.update_async()
+            await asyncio.sleep(2)
+            remove_from_queue(self.pkg_title)
+        else:
+            self.status = "Failed"
+            self.status_icon = ft.Icon(ft.Icons.ERROR_ROUNDED, color=ft.Colors.RED)
+            self.status_text.value = self.status
+            self.retry_button.visible = True
+            self.remove_button.disabled = False
+            await AppNotifier.show_snackbar(response.get('message', 'An unknown error occurred.'), bgcolor=ft.Colors.RED_800)
+            await _page_ref.update_async()
+
+    def remove(self, e):
+        remove_from_queue(self.pkg_title)
+
+    def build(self):
+        return self.view
 
 
 async def show_queue_screen():
