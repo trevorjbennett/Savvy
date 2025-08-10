@@ -34,6 +34,7 @@ def perform_search(query: str) -> List[Dict[str, Any]]:
             version_idx = int(version_idx_str)
             version_data = data_loader.SOFTWARE_DATA[key]['Versions'][version_idx].copy()
             version_data['SoftwareTitle'] = data_loader.SOFTWARE_DATA[key]['Title']
+            version_data['PackageIdentifier'] = key
             version_data['__metadata_id'] = metadata_id
             results.append(version_data)
     logging.info(f"perform_search returning {len(results)} results.")
@@ -54,6 +55,7 @@ def perform_tag_filter(tag: str) -> List[Dict[str, Any]]:
             version_data = software_info['Versions'][version_idx]
             result_item = version_data.copy()
             result_item['SoftwareTitle'] = software_info.get('Title', key)
+            result_item['PackageIdentifier'] = key
             result_item['__metadata_id'] = metadata_id
             results.append(result_item)
         except (KeyError, IndexError, ValueError):
@@ -97,6 +99,9 @@ def find_related_packages(target_pkg_data: dict, count: int = 4) -> List[Dict[st
             break
 
     logging.info(f"Found {len(results)} related packages.")
+    if results:
+        recommended_titles = [p.get('SoftwareTitle', 'Unknown') for p in results]
+        logging.info(f"Recommended titles: {recommended_titles}")
     return results
 
 def get_default_results() -> List[Dict[str, Any]]:
@@ -110,6 +115,7 @@ def get_default_results() -> List[Dict[str, Any]]:
             software_info = data_loader.SOFTWARE_DATA[key]
             version_data = software_info['Versions'][version_idx].copy()
             version_data['SoftwareTitle'] = software_info.get('Title', key)
+            version_data['PackageIdentifier'] = key
             version_data['__metadata_id'] = metadata_id
             indexed_packages.append(version_data)
         except (KeyError, IndexError, ValueError):
