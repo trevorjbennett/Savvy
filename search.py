@@ -61,9 +61,18 @@ def perform_tag_filter(tag: str) -> List[Dict[str, Any]]:
     return results
 
 def find_related_packages(target_pkg_data: dict, count: int = 4) -> List[Dict[str, Any]]:
+    import logging
+    logging.info(f"Finding related packages for: {target_pkg_data.get('SoftwareTitle', 'Unknown')}")
+
     target_metadata_id = target_pkg_data.get('__metadata_id')
-    if not target_metadata_id or not data_loader.MODEL or not data_loader.VECTOR_INDEX or not data_loader.SOFTWARE_DATA:
+    if not target_metadata_id:
+        logging.warning("Target package data is missing '__metadata_id'. Cannot find related packages.")
         return []
+
+    if not data_loader.MODEL or not data_loader.VECTOR_INDEX or not data_loader.SOFTWARE_DATA:
+        logging.error("One or more data components (MODEL, VECTOR_INDEX, SOFTWARE_DATA) are not loaded.")
+        return []
+
     try:
         target_idx = data_loader.VECTOR_INDEX['metadata'].index(target_metadata_id)
         target_embedding = data_loader.VECTOR_INDEX['embeddings'][target_idx]
@@ -86,6 +95,8 @@ def find_related_packages(target_pkg_data: dict, count: int = 4) -> List[Dict[st
         results.append(version_data)
         if len(results) == count:
             break
+
+    logging.info(f"Found {len(results)} related packages.")
     return results
 
 def get_default_results() -> List[Dict[str, Any]]:

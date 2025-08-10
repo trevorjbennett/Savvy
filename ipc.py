@@ -40,14 +40,15 @@ class ChocoWorker:
                 self.response_q.put(response)
                 continue
 
+            choco_path = 'C:\\ProgramData\\chocolatey\\bin\\choco.bat'
+
             if message.get('type') == 'check_status':
                 try:
-                    # Running 'choco --version' is a lightweight way to check if it's installed and in the PATH.
-                    result = subprocess.run(['choco', '--version'], capture_output=True, text=True, check=True, encoding='utf-8')
+                    result = subprocess.run([choco_path, '--version'], capture_output=True, text=True, check=True, encoding='utf-8')
                     version = result.stdout.strip()
                     response = {'status': 'choco_ok', 'version': version}
                 except FileNotFoundError:
-                    response = {'status': 'choco_not_found', 'message': 'Chocolatey executable not found in PATH.'}
+                    response = {'status': 'choco_not_found', 'message': f'Chocolatey not found at {choco_path}.'}
                 except Exception as e:
                     response = {'status': 'choco_error', 'message': str(e)}
                 self.response_q.put(response)
@@ -69,11 +70,10 @@ class ChocoWorker:
                     continue
 
                 try:
-                    # Whitelist commands for security
                     if command not in ['install', 'uninstall', 'upgrade']:
                         raise ValueError(f"Command '{command}' is not allowed.")
 
-                    choco_command = ['choco', command, package_id, '-y']
+                    choco_command = [choco_path, command, package_id, '-y']
 
                     logging.info(f"Executing command: {' '.join(choco_command)}")
 
