@@ -6,7 +6,7 @@ from typing import List, Optional, Callable
 from datetime import datetime, timedelta
 
 from data_loader import _top_tags
-from ipc import SearchWorker
+from ipc import SearchWorker, ChocoWorker
 from typing import Awaitable
 import search
 
@@ -36,6 +36,7 @@ _sort_dropdown: ft.Dropdown = None
 _recent_toggle: ft.Switch = None
 _top_tags: List[str] = []
 _search_worker: SearchWorker = None
+_choco_worker: Optional[ChocoWorker] = None
 _debounce_task: Optional[asyncio.Task] = None
 _theme_toggle: Optional[ft.Switch] = None
 
@@ -849,6 +850,79 @@ async def show_queue_screen():
     _page_ref.appbar = create_app_bar("queue")
     _page_ref.bgcolor = BACKGROUND_COLOR
 
+    progress = ft.ProgressBar(width=400, value=0)
+    status_text = ft.Text("Ready to install.")
+    install_button = ft.FilledButton("Install All", icon=ft.Icons.PLAYLIST_ADD_CHECK_CIRCLE_ROUNDED, on_click=None, style=ft.ButtonStyle(bgcolor=BUTTON_PRIMARY_BG, color=TEXT_ON_PRIMARY_ACTION, shape=ft.RoundedRectangleBorder(radius=BUTTON_RADIUS)))
+    clear_button = ft.OutlinedButton("Clear Queue", icon=ft.Icons.DELETE_SWEEP_ROUNDED, on_click=None)
+
+    async def listen_for_install_updates(total_packages: int):
+        installed_count = 0
+        install_button.disabled = True
+        clear_button.disabled = True
+        _page_ref.update()
+
+        while installed_count < total_packages:
+            try:
+                response = await asyncio.to_thread(_choco_worker.response_q.get, timeout=300)
+                installed_count += 1
+
+                title = response.get('package_title', 'Unknown package')
+                status = response.get('status')
+                message = response.get('message')
+
+                progress.value = installed_count / total_packages
+                status_text.value = f"({installed_count}/{total_packages}) {title}: {status}"
+
+                if status == 'success':
+                    remove_from_queue(title)
+                    await AppNotifier.show_snackbar(message)
+                else:
+                    await AppNotifier.show_snackbar(f"Error installing {title}: {message}", bgcolor=ft.Colors.RED_800)
+
+                _page_ref.update()
+
+            except Exception: # Catches queue.Empty
+                status_text.value = f"({installed_count}/{total_packages}) Installation timed out."
+                _page_ref.update()
+                break
+
+        status_text.value = "All installation tasks processed."
+        install_button.disabled = False
+        clear_button.disabled = False
+        _page_ref.update()
+
+
+    async def install_all(e=None):
+        if not _install_queue or not _choco_worker:
+            return
+
+        total = len(_install_queue)
+        status_text.value = f"Starting installation of {total} packages..."
+        _page_ref.update()
+
+        packages_to_install = list(_install_queue)
+
+        for pkg in packages_to_install:
+            pkg_id = pkg.get("PackageIdentifier")
+            pkg_title = pkg.get("SoftwareTitle", "Unknown")
+            if pkg_id:
+                _choco_worker.execute('install', pkg_id, pkg_title)
+            else:
+                await AppNotifier.show_snackbar(f"Skipping '{pkg_title}': Missing PackageIdentifier.", bgcolor=ft.Colors.AMBER_800)
+                total -= 1
+
+        if total > 0:
+            _page_ref.run_task(listen_for_install_updates, total)
+
+    install_button.on_click = install_all
+
+    def _clear_queue(e=None):
+        _install_queue.clear()
+        update_queue_badge()
+        _page_ref.run_task(show_queue_screen)
+
+    clear_button.on_click = _clear_queue
+
     if not _install_queue:
         placeholder_content = ft.Column(
             [
@@ -861,12 +935,7 @@ async def show_queue_screen():
             spacing=20,
             expand=True,
         )
-        faded_hue_effect = ft.Container(
-            width=400, height=400,
-            gradient=ft.RadialGradient(center=ft.alignment.bottom_right, radius=1.2, colors=[ft.Colors.BLUE_GREY_300, ft.Colors.TRANSPARENT], stops=[0.0, 0.8]),
-            right=0, bottom=0, opacity=0.3
-        )
-        _page_ref.add(ft.Stack([faded_hue_effect, placeholder_content], expand=True))
+        _page_ref.add(ft.Stack([placeholder_content], expand=True))
         _page_ref.update()
         return
 
@@ -886,33 +955,9 @@ async def show_queue_screen():
             )
         )
 
-    progress = ft.ProgressBar(width=400, value=0)
-    status_text = ft.Text("Ready")
-
-    async def install_all(e=None):
-        if not _install_queue:
-            return
-        total = len(_install_queue)
-        for i, pkg in enumerate(list(_install_queue)):
-            title = pkg.get("SoftwareTitle", "Unknown")
-            status_text.value = f"Installing {title} ({i+1}/{total})"
-            progress.value = i / total
-            _page_ref.update()
-            await asyncio.sleep(0.6)  # simulate install
-            remove_from_queue(title)
-        progress.value = 1
-        status_text.value = "All done"
-        _page_ref.update()
-        await AppNotifier.show_snackbar("Install simulation finished")
-
-    def _clear_queue():
-        _install_queue.clear()
-        update_queue_badge()
-        _page_ref.run_task(show_queue_screen)
-
     actions = ft.Row([
-        ft.FilledButton("Install All", icon=ft.Icons.PLAYLIST_ADD_CHECK_CIRCLE_ROUNDED, on_click=install_all, style=ft.ButtonStyle(bgcolor=BUTTON_PRIMARY_BG, color=TEXT_ON_PRIMARY_ACTION, shape=ft.RoundedRectangleBorder(radius=BUTTON_RADIUS))),
-        ft.OutlinedButton("Clear Queue", icon=ft.Icons.DELETE_SWEEP_ROUNDED, on_click=lambda e: _clear_queue()),
+        install_button,
+        clear_button,
         progress,
         status_text,
     ], spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER)
@@ -921,7 +966,7 @@ async def show_queue_screen():
         ft.Container(height=8),
         ft.Text("Installation Queue", size=22, weight=ft.FontWeight.W_600),
         ft.Container(height=6),
-        ft.Column(items, spacing=10, expand=True),
+        ft.Column(items, spacing=10, expand=True, scroll=ft.ScrollMode.ADAPTIVE),
         ft.Divider(color=BORDER_COLOR),
         actions,
     ], expand=True)
@@ -930,10 +975,11 @@ async def show_queue_screen():
     _page_ref.update()
 
 
-async def main(page: ft.Page, search_worker: SearchWorker):
-    global _page_ref, _global_snackbar, _search_worker
+async def main(page: ft.Page, search_worker: SearchWorker, choco_worker: ChocoWorker):
+    global _page_ref, _global_snackbar, _search_worker, _choco_worker
     _page_ref = page
     _search_worker = search_worker
+    _choco_worker = choco_worker
 
     page.title = "Savvy App Centre (Semantic Search)"
     page.window_frameless = True

@@ -1,8 +1,130 @@
 import multiprocessing
+import subprocess
+import sys
 from typing import Any, Dict, List
 
 from data_loader import load_data_and_model
 import search
+
+
+class ChocoWorker:
+    def __init__(self):
+        self.request_q: multiprocessing.Queue = multiprocessing.Queue()
+        self.response_q: multiprocessing.Queue = multiprocessing.Queue()
+        self.proc = multiprocessing.Process(target=self._worker, daemon=True)
+        self.proc.start()
+
+    def _worker(self):
+        import logging
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        logging.info("ChocoWorker process started.")
+
+        if sys.platform != "win32":
+            logging.warning("ChocoWorker started on a non-Windows platform. It will not be functional.")
+
+        while True:
+            message = self.request_q.get()
+            logging.info(f"ChocoWorker received message: {message}")
+
+            if message.get('type') == 'stop':
+                logging.info("ChocoWorker received stop signal. Exiting.")
+                break
+
+            if sys.platform != "win32":
+                response = {
+                    'status': 'error',
+                    'command': message.get('command'),
+                    'package_title': message.get('package_title'),
+                    'message': 'Chocolatey is only available on Windows.'
+                }
+                self.response_q.put(response)
+                continue
+
+            if message.get('type') == 'command':
+                command = message.get('command')
+                package_id = message.get('package_id')
+                package_title = message.get('package_title')
+
+                if not command or not package_id:
+                    response = {
+                        'status': 'error',
+                        'command': command,
+                        'package_title': package_title,
+                        'message': 'Invalid command message received.'
+                    }
+                    self.response_q.put(response)
+                    continue
+
+                try:
+                    # Whitelist commands for security
+                    if command not in ['install', 'uninstall', 'upgrade']:
+                        raise ValueError(f"Command '{command}' is not allowed.")
+
+                    choco_command = ['choco', command, package_id, '-y']
+
+                    logging.info(f"Executing command: {' '.join(choco_command)}")
+
+                    result = subprocess.run(
+                        choco_command,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        encoding='utf-8'
+                    )
+
+                    logging.info(f"Command finished with exit code {result.returncode}")
+
+                    if result.returncode == 0:
+                        response = {
+                            'status': 'success',
+                            'command': command,
+                            'package_title': package_title,
+                            'message': f"Successfully executed '{command}' for {package_title}."
+                        }
+                    else:
+                        error_message = result.stderr.strip().split('\n')[-1] or result.stdout.strip().split('\n')[-1] or f"Choco command failed with exit code {result.returncode}."
+                        response = {
+                            'status': 'error',
+                            'command': command,
+                            'package_title': package_title,
+                            'message': error_message
+                        }
+
+                except FileNotFoundError:
+                    logging.error("Choco command not found. Is Chocolatey installed and in the system's PATH?")
+                    response = {
+                        'status': 'error',
+                        'command': command,
+                        'package_title': package_title,
+                        'message': 'Choco executable not found. Is it installed?'
+                    }
+                except Exception as e:
+                    logging.error(f"An unexpected error occurred in ChocoWorker: {e}")
+                    response = {
+                        'status': 'error',
+                        'command': command,
+                        'package_title': package_title,
+                        'message': f"An unexpected error occurred: {e}"
+                    }
+
+                self.response_q.put(response)
+
+    def execute(self, command: str, package_id: str, package_title: str):
+        self.request_q.put({
+            'type': 'command',
+            'command': command,
+            'package_id': package_id,
+            'package_title': package_title
+        })
+
+    def close(self):
+        # If the queue is empty, putting an item can hang if the process is dead
+        # A better approach might be to check if the process is alive
+        if self.proc.is_alive():
+            self.request_q.put({'type': 'stop'})
+            self.proc.join(timeout=5) # Add a timeout
+            if self.proc.is_alive():
+                self.proc.terminate() # Force terminate if it doesn't stop
 
 
 class SearchWorker:

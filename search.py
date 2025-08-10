@@ -87,38 +87,6 @@ def find_related_packages(target_pkg_data: dict, count: int = 4) -> List[Dict[st
         if len(results) == count:
             break
     return results
-    import data_loader
-    target_metadata_id = target_pkg_data.get('__metadata_id')
-    if not target_metadata_id or not data_loader.MODEL or not data_loader.VECTOR_INDEX or not data_loader.SOFTWARE_DATA:
-        return []
-
-    try:
-        target_idx = data_loader.VECTOR_INDEX['metadata'].index(target_metadata_id)
-        target_embedding = data_loader.VECTOR_INDEX['embeddings'][target_idx]
-    except (ValueError, IndexError):
-        import logging
-        logging.warning(f"Could not find metadata_id {target_metadata_id} in index.")
-        return []
-
-    similarities = cosine_similarity([target_embedding], data_loader.VECTOR_INDEX['embeddings'])[0]
-    top_indices = np.argsort(similarities)[-(count+1):][::-1]
-
-    results = []
-    for idx in top_indices:
-        metadata_id = data_loader.VECTOR_INDEX['metadata'][idx]
-        if metadata_id == target_metadata_id:
-            continue
-
-        key, version_idx_str = metadata_id.split('::')
-        version_idx = int(version_idx_str)
-        version_data = data_loader.SOFTWARE_DATA[key]['Versions'][version_idx].copy()
-        version_data['SoftwareTitle'] = data_loader.SOFTWARE_DATA[key]['Title']
-        version_data['__metadata_id'] = metadata_id
-        results.append(version_data)
-
-        if len(results) == count:
-            break
-    return results
 
 def get_default_results() -> List[Dict[str, Any]]:
     if not data_loader.SOFTWARE_DATA or not data_loader.VECTOR_INDEX:
